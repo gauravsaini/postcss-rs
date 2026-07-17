@@ -1,0 +1,1 @@
+/home/gsai/.gemini/antigravity-cli/scratch/postcss-rs/target/release/libpostcss_rs.so: /home/gsai/.gemini/antigravity-cli/scratch/postcss-rs/build.rs /home/gsai/.gemini/antigravity-cli/scratch/postcss-rs/src/lib.rs
