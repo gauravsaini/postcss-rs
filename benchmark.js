@@ -1,5 +1,5 @@
 const postcssRs = require('./bridge.js');
-const postcssOriginalParse = require('/home/gsai/.gemini/antigravity-cli/brain/f8add69d-0e19-412c-b372-865281edb5cb/scratch/postcss/lib/parse.js');
+const postcssOriginalParse = require('../postcss/lib/parse.js');
 
 console.log("Generating large mock CSS document...");
 

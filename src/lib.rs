@@ -1,6 +1,3 @@
-mod ast_builder;
-pub use ast_builder::{build_raw_node, RawNode};
-
 use serde::Serialize;
 use napi_derive::napi;
 use napi::bindgen_prelude::Int32Array;
@@ -24,7 +21,7 @@ pub struct Token<'a> {
     pub end: usize,
 }
 
-pub fn tokenize(css: &str) -> Vec<Token> {
+pub fn tokenize<'a>(css: &'a str) -> Result<Vec<Token<'a>>, String> {
     let mut tokens = Vec::new();
     let bytes = css.as_bytes();
     let len = bytes.len();
@@ -71,12 +68,20 @@ pub fn tokenize(css: &str) -> Vec<Token> {
                 pos += 1;
                 if is_url {
                     let mut escaped = false;
+                    let mut in_quote = None;
                     while pos < len {
-                        if bytes[pos] == b')' && !escaped {
+                        let c = bytes[pos];
+                        if let Some(q) = in_quote {
+                            if c == q && !escaped {
+                                in_quote = None;
+                            }
+                        } else if (c == b'\'' || c == b'"') && !escaped {
+                            in_quote = Some(c);
+                        } else if c == b')' && !escaped {
                             pos += 1;
                             break;
                         }
-                        if bytes[pos] == b'\\' {
+                        if c == b'\\' {
                             escaped = !escaped;
                         } else {
                             escaped = false;
@@ -130,13 +135,33 @@ pub fn tokenize(css: &str) -> Vec<Token> {
                         next += 1;
                     }
                     if found {
-                        pos = next;
-                        tokens.push(Token {
-                            token_type: TokenType::Brackets,
-                            content: &css[start..pos],
-                            start,
-                            end: pos,
-                        });
+                        let bracket_content = &css[start..next];
+                        let mut is_bad = false;
+                        if bracket_content.len() > 1 {
+                            for c in bracket_content[1..].bytes() {
+                                if c == b'\n' || c == b'\r' || c == b'"' || c == b'\'' || c == b'(' || c == b'\\' || c == b'/' {
+                                    is_bad = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if is_bad {
+                            tokens.push(Token {
+                                token_type: TokenType::Char('('),
+                                content: "(",
+                                start,
+                                end: start + 1,
+                            });
+                            pos = start + 1;
+                        } else {
+                            pos = next;
+                            tokens.push(Token {
+                                token_type: TokenType::Brackets,
+                                content: bracket_content,
+                                start,
+                                end: pos,
+                            });
+                        }
                     } else {
                         tokens.push(Token {
                             token_type: TokenType::Char('('),
@@ -152,9 +177,11 @@ pub fn tokenize(css: &str) -> Vec<Token> {
                 let quote = code;
                 pos += 1;
                 let mut escaped = false;
+                let mut closed = false;
                 while pos < len {
                     if bytes[pos] == quote && !escaped {
                         pos += 1;
+                        closed = true;
                         break;
                     }
                     if bytes[pos] == b'\\' {
@@ -163,6 +190,9 @@ pub fn tokenize(css: &str) -> Vec<Token> {
                         escaped = false;
                     }
                     pos += 1;
+                }
+                if !closed {
+                    return Err(format!("Unclosed string:{}", start));
                 }
                 tokens.push(Token {
                     token_type: TokenType::String,
@@ -223,12 +253,17 @@ pub fn tokenize(css: &str) -> Vec<Token> {
                 if pos + 1 < len && bytes[pos + 1] == b'*' {
                     let start = pos;
                     pos += 2;
+                    let mut closed = false;
                     while pos + 1 < len {
                         if bytes[pos] == b'*' && bytes[pos + 1] == b'/' {
                             pos += 2;
+                            closed = true;
                             break;
                         }
                         pos += 1;
+                    }
+                    if !closed {
+                        return Err(format!("Unclosed comment:{}", start));
                     }
                     tokens.push(Token {
                         token_type: TokenType::Comment,
@@ -288,7 +323,7 @@ pub fn tokenize(css: &str) -> Vec<Token> {
         }
     }
 
-    tokens
+    Ok(tokens)
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -318,8 +353,6 @@ pub enum PostCssNodeData {
     #[serde(rename = "rule")]
     Rule {
         selector: String,
-        #[serde(rename = "raws_selector")]
-        raws_selector: Option<String>,
         nodes: Vec<usize>,
         #[serde(rename = "raws_before")]
         raws_before: String,
@@ -329,17 +362,15 @@ pub enum PostCssNodeData {
         raws_after: Option<String>,
         #[serde(rename = "raws_semicolon")]
         raws_semicolon: bool,
-        #[serde(rename = "semicolon")]
-        semicolon: bool,
-        #[serde(rename = "after")]
-        after: Option<String>,
+        #[serde(rename = "raws_selector")]
+        raws_selector: Option<String>,
+        #[serde(rename = "raws_own_semicolon")]
+        raws_own_semicolon: Option<String>,
     },
     #[serde(rename = "decl")]
     Decl {
         prop: String,
         value: String,
-        #[serde(rename = "raws_value")]
-        raws_value: Option<String>,
         important: bool,
         #[serde(rename = "raws_before")]
         raws_before: String,
@@ -347,8 +378,8 @@ pub enum PostCssNodeData {
         raws_between: String,
         #[serde(rename = "raws_important")]
         raws_important: Option<String>,
-        #[serde(rename = "raws_semicolon")]
-        raws_semicolon: bool,
+        #[serde(rename = "raws_value")]
+        raws_value: Option<String>,
     },
     #[serde(rename = "atrule")]
     AtRule {
@@ -422,13 +453,11 @@ pub struct PostCssParser<'a> {
     spaces: String,
     semicolon: bool,
     current: usize,
-    // Track semicolon at end of decl for semicolon raws
-    decl_semicolon: bool,
 }
 
 impl<'a> PostCssParser<'a> {
-    pub fn new(css: &'a str, map: &LineColMap) -> Self {
-        let tokens = tokenize(css);
+    pub fn new(css: &'a str, map: &LineColMap) -> Result<Self, String> {
+        let tokens = tokenize(css)?;
         let mut parser = Self {
             css,
             tokens,
@@ -437,7 +466,6 @@ impl<'a> PostCssParser<'a> {
             spaces: String::new(),
             semicolon: false,
             current: 0,
-            decl_semicolon: false,
         };
 
         // Create Root Node
@@ -455,12 +483,21 @@ impl<'a> PostCssParser<'a> {
             },
         };
         parser.nodes.push(root);
-        parser
+        Ok(parser)
     }
 
     fn get_pos(&self, offset: usize, map: &LineColMap) -> SourcePos {
         let (line, column) = map.get(offset);
         SourcePos { line, column, offset }
+    }
+
+    fn get_end_pos(&self, offset: usize, map: &LineColMap) -> SourcePos {
+        if offset > 0 {
+            let (line, column) = map.get(offset - 1);
+            SourcePos { line, column, offset }
+        } else {
+            SourcePos { line: 1, column: 1, offset: 0 }
+        }
     }
 
     fn end_of_file(&self) -> bool {
@@ -472,14 +509,6 @@ impl<'a> PostCssParser<'a> {
             let tok = &self.tokens[self.token_idx];
             self.token_idx += 1;
             Some(tok)
-        } else {
-            None
-        }
-    }
-
-    fn peek_token(&self) -> Option<&Token<'a>> {
-        if self.token_idx < self.tokens.len() {
-            Some(&self.tokens[self.token_idx])
         } else {
             None
         }
@@ -505,7 +534,7 @@ impl<'a> PostCssParser<'a> {
             }
         };
         self.nodes.push(node);
-
+        
         match &mut self.nodes[parent_id].data {
             PostCssNodeData::Root { nodes, .. } => nodes.push(new_id),
             PostCssNodeData::Rule { nodes, .. } => nodes.push(new_id),
@@ -518,28 +547,20 @@ impl<'a> PostCssParser<'a> {
             }
             _ => {}
         }
-
+        
         new_id
-    }
-
-    fn consume_spaces_and_comments(&mut self) -> String {
-        let mut result = String::new();
-        while !self.end_of_file() {
-            let token = self.next_token().unwrap();
-            if token.token_type == TokenType::Space || token.token_type == TokenType::Comment {
-                result.push_str(token.content);
-            } else {
-                self.back();
-                break;
-            }
-        }
-        result
     }
 
     fn comment(&mut self, token: &Token<'a>, map: &LineColMap) {
         let before = std::mem::take(&mut self.spaces);
-        let text_raw = &token.content[2..token.content.len() - 2];
-
+        let mut text_raw = token.content;
+        if text_raw.starts_with("/*") {
+            text_raw = &text_raw[2..];
+        }
+        if text_raw.ends_with("*/") {
+            text_raw = &text_raw[..text_raw.len() - 2];
+        }
+        
         let (text, left, right) = if text_raw.trim().is_empty() {
             ("".to_string(), text_raw.to_string(), "".to_string())
         } else {
@@ -560,16 +581,49 @@ impl<'a> PostCssParser<'a> {
             raws_right: right,
         };
         let node_id = self.add_node(data, token.start, map);
-        self.nodes[node_id].source.end = Some(self.get_pos(token.end, map));
+        self.nodes[node_id].source.end = Some(self.get_end_pos(token.end, map));
     }
 
-    fn free_semicolon(&mut self, token: &Token<'a>) {
-        self.semicolon = true;
+    fn free_semicolon(&mut self, token: &Token<'a>, map: &LineColMap) {
         self.spaces.push_str(token.content);
+        let current_id = self.current;
+        let last_node_id = match &self.nodes[current_id].data {
+            PostCssNodeData::Root { nodes, .. } => nodes.last().copied(),
+            PostCssNodeData::Rule { nodes, .. } => nodes.last().copied(),
+            PostCssNodeData::AtRule { nodes: Some(nodes), .. } => nodes.last().copied(),
+            _ => None,
+        };
+        if let Some(last_id) = last_node_id {
+            let mut is_rule_without_own_semi = false;
+            match &self.nodes[last_id].data {
+                PostCssNodeData::Rule { raws_own_semicolon, .. } => {
+                    if raws_own_semicolon.is_none() {
+                        is_rule_without_own_semi = true;
+                    }
+                }
+                _ => {}
+            }
+            if is_rule_without_own_semi {
+                let spaces_taken = std::mem::take(&mut self.spaces);
+                let final_offset = token.start + spaces_taken.len();
+                match &mut self.nodes[last_id].data {
+                    PostCssNodeData::Rule { raws_own_semicolon, .. } => {
+                        *raws_own_semicolon = Some(spaces_taken);
+                    }
+                    _ => {}
+                }
+                let mut end_pos = self.get_end_pos(token.end, map);
+                end_pos.offset = final_offset;
+                self.nodes[last_id].source.end = Some(end_pos);
+            }
+        }
     }
 
-    fn end(&mut self, token: &Token<'a>, map: &LineColMap) {
+    fn end(&mut self, token: &Token<'a>, map: &LineColMap) -> Result<(), String> {
         let current_id = self.current;
+        if current_id == 0 {
+            return Err(format!("Unexpected }}:{}:{}", token.start, token.end));
+        }
         let semicolon_val = self.semicolon;
         self.semicolon = false;
 
@@ -584,13 +638,13 @@ impl<'a> PostCssParser<'a> {
             PostCssNodeData::Rule { raws_after, raws_semicolon, .. } => {
                 raws_after.get_or_insert(String::new()).push_str(&spaces_taken);
                 *raws_semicolon = semicolon_val;
-                self.nodes[current_id].source.end = Some(self.get_pos(token.end, map));
+                self.nodes[current_id].source.end = Some(self.get_end_pos(token.end, map));
                 self.nodes[current_id].parent
             }
             PostCssNodeData::AtRule { raws_after, raws_semicolon, .. } => {
                 raws_after.get_or_insert(String::new()).push_str(&spaces_taken);
                 *raws_semicolon = semicolon_val;
-                self.nodes[current_id].source.end = Some(self.get_pos(token.end, map));
+                self.nodes[current_id].source.end = Some(self.get_end_pos(token.end, map));
                 self.nodes[current_id].parent
             }
             _ => None,
@@ -599,16 +653,21 @@ impl<'a> PostCssParser<'a> {
         if let Some(p_id) = parent_id {
             self.current = p_id;
         }
+        Ok(())
     }
 
-    fn atrule(&mut self, start_token: &Token<'a>, map: &LineColMap) {
+    fn atrule(&mut self, start_token: &Token<'a>, map: &LineColMap) -> Result<(), String> {
         let name = start_token.content[1..].to_string();
+        if name.is_empty() {
+            return Err(format!("At-rule without name:{}:{}", start_token.start, start_token.end));
+        }
         let before = std::mem::take(&mut self.spaces);
-
+        
         let mut params_tokens = Vec::new();
         let mut brackets = Vec::new();
         let mut open = false;
-        let mut last = false;
+
+        let mut end_offset = 0;
 
         while !self.end_of_file() {
             let token = self.next_token().unwrap().clone();
@@ -631,6 +690,7 @@ impl<'a> PostCssParser<'a> {
                 match t_type {
                     TokenType::Char(';') => {
                         self.semicolon = true;
+                        end_offset = token.end;
                         break;
                     }
                     TokenType::Char('{') => {
@@ -650,13 +710,10 @@ impl<'a> PostCssParser<'a> {
             }
         }
 
-        if self.end_of_file() && brackets.is_empty() {
-            last = true;
-        }
 
-        // Extract afterName (spaces after at-rule name)
-        let after_name = spaces_and_comments_from_start(&mut params_tokens);
+
         let between = spaces_and_comments_from_end(&mut params_tokens);
+        let after_name = spaces_and_comments_from_start(&mut params_tokens);
         let params_str: String = params_tokens.iter().map(|t| t.content).collect();
 
         let data = PostCssNodeData::AtRule {
@@ -673,23 +730,34 @@ impl<'a> PostCssParser<'a> {
         let node_id = self.add_node(data, start_token.start, map);
 
         if !open {
-            let end_pos = if last && !params_tokens.is_empty() {
-                let last_tok = params_tokens.last().unwrap();
-                self.get_pos(last_tok.end, map)
-            } else {
-                self.get_pos(start_token.end, map)
-            };
-            self.nodes[node_id].source.end = Some(end_pos);
+            let mut final_end_offset = None;
+            if end_offset > 0 {
+                final_end_offset = Some(end_offset);
+            } else if !params_tokens.is_empty() {
+                final_end_offset = Some(params_tokens.last().unwrap().end);
+            }
+            if let Some(offset_val) = final_end_offset {
+                self.nodes[node_id].source.end = Some(self.get_end_pos(offset_val, map));
+            }
         } else {
             self.current = node_id;
         }
+        Ok(())
     }
 
-    fn other(&mut self, start_token: Token<'a>, map: &LineColMap) {
+    fn other(&mut self, start_token: Token<'a>, map: &LineColMap) -> Result<(), String> {
         let custom_property = start_token.content.starts_with("--");
+        let mut brackets = Vec::new();
+        let mut bracket_offsets = Vec::new();
+        match &start_token.token_type {
+            TokenType::Char('(') | TokenType::Char('[') => {
+                brackets.push(if start_token.token_type == TokenType::Char('(') { ')' } else { ']' });
+                bracket_offsets.push(start_token.start);
+            }
+            _ => {}
+        }
         let mut tokens = vec![start_token];
         let mut colon = false;
-        let mut brackets = Vec::new();
         let mut end = false;
 
         while !self.end_of_file() {
@@ -697,79 +765,46 @@ impl<'a> PostCssParser<'a> {
             let t_type = &token.token_type;
             tokens.push(token.clone());
 
+            let mut popped = false;
             match t_type {
                 TokenType::Char('(') | TokenType::Char('[') => {
                     brackets.push(if *t_type == TokenType::Char('(') { ')' } else { ']' });
+                    bracket_offsets.push(token.start);
                 }
                 TokenType::Char('{') if custom_property && colon => {
                     brackets.push('}');
+                    bracket_offsets.push(token.start);
                 }
                 TokenType::Char(c) if !brackets.is_empty() && Some(*c) == brackets.last().copied() => {
                     brackets.pop();
-                    // If we just closed the custom property block, check for semicolon
-                    if brackets.is_empty() && custom_property && colon {
-                        eprintln!("DEBUG: Custom prop block closed, calling decl()");
-                        // DON'T remove the closing } from tokens - it's part of the value for custom props
-                        // Check if next token is semicolon
-                        if !self.end_of_file() {
-                            let next = self.next_token().unwrap().clone();
-                            if next.token_type == TokenType::Char(';') {
-                                tokens.push(next);
-                                self.semicolon = true;
-                            } else {
-                                self.back();
-                            }
-                        }
-                        self.decl(tokens, custom_property, map);
-                        return;
-                    }
+                    bracket_offsets.pop();
+                    popped = true;
                 }
                 _ => {}
             }
 
-            if brackets.is_empty() {
+            if brackets.is_empty() && !popped {
                 match t_type {
                     TokenType::Char(';') => {
                         if colon {
-                            self.decl(tokens, custom_property, map);
-                            return;
+                            self.decl(tokens, custom_property, map)?;
+                            return Ok(());
                         } else {
                             break;
                         }
                     }
                     TokenType::Char('{') => {
-                        if custom_property && colon {
-                            // Start of custom property block value - continue collecting
-                            brackets.push('}');
-                            // DO NOT return - continue loop to collect tokens inside braces
-                        } else {
-                            self.rule(tokens, map);
-                            return;
-                        }
+                        self.rule(tokens, map);
+                        return Ok(());
                     }
                     TokenType::Char('}') => {
                         tokens.pop();
                         self.back();
-                        // If we're inside a rule (current node is Rule) and brackets are empty,
-                        // this } ends the rule, not the declaration
-                        let is_in_rule = matches!(&self.nodes[self.current].data, PostCssNodeData::Rule { .. });
-                        eprintln!("DEBUG: Found }} with brackets.empty, is_in_rule={}, colon={}, current={}", is_in_rule, colon, self.current);
-                        if is_in_rule && colon {
-                            // We have a declaration to finalize before the rule ends
-                            self.decl(tokens, custom_property, map);
-                            return;
-                        } else if is_in_rule {
-                            // No declaration in progress, just end the rule
-                            end = true;
-                            return;
-                        }
                         end = true;
                         break;
                     }
                     TokenType::Char(':') => {
-                        if !colon {
-                            colon = true;
-                        }
+                        colon = true;
                     }
                     _ => {}
                 }
@@ -778,6 +813,11 @@ impl<'a> PostCssParser<'a> {
 
         if self.end_of_file() {
             end = true;
+        }
+
+        if !brackets.is_empty() {
+            let offset = bracket_offsets.last().copied().unwrap_or(tokens[0].start);
+            return Err(format!("Unclosed bracket:{}:{}", offset, offset + 1));
         }
 
         if end && colon {
@@ -791,43 +831,43 @@ impl<'a> PostCssParser<'a> {
                     }
                 }
             }
-            self.decl(tokens, custom_property, map);
+            self.decl(tokens, custom_property, map)?;
+            Ok(())
         } else {
-            self.rule(tokens, map);
+            let start_offset = tokens[0].start;
+            let end_offset = tokens[0].end;
+            Err(format!("Unknown word:{}:{}", start_offset, end_offset))
         }
     }
 
-    fn decl(&mut self, mut tokens: Vec<Token<'a>>, custom_property: bool, map: &LineColMap) {
+    fn decl(&mut self, mut tokens: Vec<Token<'a>>, custom_property: bool, map: &LineColMap) -> Result<(), String> {
         let before = std::mem::take(&mut self.spaces);
         let mut important = false;
         let mut important_raw = None;
-        let _decl_semicolon = false; // reset for each decl
 
-        // Save the outer semicolon state
-        let outer_semicolon = self.semicolon;
+        let mut end_offset = 0;
 
         if let Some(last) = tokens.last() {
             if last.token_type == TokenType::Char(';') {
                 self.semicolon = true;
+                end_offset = last.end;
                 tokens.pop();
+            } else {
+                self.semicolon = false;
             }
+        } else {
+            self.semicolon = false;
         }
 
-        // Find property name (first word token)
         let mut start_idx = 0;
         while start_idx < tokens.len() && tokens[start_idx].token_type != TokenType::Word {
             start_idx += 1;
         }
 
         if start_idx >= tokens.len() {
-            return;
+            return Ok(());
         }
 
-        // Everything before property name is "before" raw
-        let before_extra: String = tokens[0..start_idx].iter().map(|t| t.content).collect();
-        let before_total = before + &before_extra;
-
-        // Find property name end (before colon)
         let mut prop_end_idx = start_idx;
         while prop_end_idx < tokens.len() {
             let t_type = &tokens[prop_end_idx].token_type;
@@ -837,92 +877,184 @@ impl<'a> PostCssParser<'a> {
             prop_end_idx += 1;
         }
 
-        let prop = tokens[start_idx..prop_end_idx].iter().map(|t| t.content).collect::<String>();
+        let mut prop = tokens[start_idx..prop_end_idx].iter().map(|t| t.content).collect::<String>();
+        let mut before_extra: String = tokens[0..start_idx].iter().map(|t| t.content).collect();
+        if prop.starts_with('_') || prop.starts_with('*') {
+            before_extra.push(prop.remove(0));
+        }
+        let before_total = before + &before_extra;
 
-        // Between prop and value (after prop name, before colon)
         let between_start_idx = prop_end_idx;
         let mut between_end_idx = prop_end_idx;
         while between_end_idx < tokens.len() {
-            let t_type = &tokens[between_end_idx].token_type;
-            between_end_idx += 1;
-            if *t_type == TokenType::Char(':') {
+            let token = &tokens[between_end_idx];
+            if token.token_type == TokenType::Char(':') {
+                between_end_idx += 1;
                 break;
             }
+            if token.token_type == TokenType::Word && token.content.chars().any(|c| c.is_alphanumeric() || c == '_') {
+                return Err(format!("Unknown word:{}:{}", token.start, token.end));
+            }
+            between_end_idx += 1;
         }
 
-        let mut between: String = tokens[between_start_idx..between_end_idx]
-            .iter()
-            .map(|t| t.content)
-            .collect();
+        let mut between = tokens[between_start_idx..between_end_idx].iter().map(|t| t.content).collect::<String>();
 
-        // Value tokens
-        let mut val_tokens = tokens[between_end_idx..].to_vec();
+        let val_tokens = tokens[between_end_idx..].to_vec();
 
-        // Strip leading spaces/comments from value (part of between)
-        let mut first_spaces = String::new();
+        let mut first_spaces = Vec::new();
         let mut val_start = 0;
         while val_start < val_tokens.len() {
             let t = &val_tokens[val_start];
             if t.token_type == TokenType::Space || t.token_type == TokenType::Comment {
-                first_spaces.push_str(t.content);
+                first_spaces.push(t.clone());
                 val_start += 1;
             } else {
                 break;
             }
         }
+        let mut remaining_tokens = val_tokens[val_start..].to_vec();
 
-        let has_word = val_tokens[val_start..].iter().any(|t| t.token_type != TokenType::Space && t.token_type != TokenType::Comment);
-        if has_word {
-            between.push_str(&first_spaces);
-            val_tokens.drain(0..val_start);
+        let mut important_idx = None;
+        for (i, t) in remaining_tokens.iter().enumerate().rev() {
+            if t.token_type != TokenType::Space && t.token_type != TokenType::Comment {
+                if t.content.to_lowercase() == "!important" || t.content.to_lowercase() == "important" {
+                    important_idx = Some(i);
+                }
+                break;
+            }
         }
 
-        // Check for !important
-        if let Some(pos) = val_tokens.iter().rposition(|t| t.content.to_lowercase() == "!important") {
-            important = true;
-            let mut imp_raw_tokens = val_tokens[..pos].to_vec();
-            let imp_raw_spaces = spaces_from_end(&mut imp_raw_tokens);
-            important_raw = Some(imp_raw_spaces + "!important");
-            val_tokens.truncate(pos);
-        } else if let Some(pos) = val_tokens.iter().rposition(|t| t.content.to_lowercase() == "important") {
-            let mut found_excl = false;
-            let mut search_idx = pos;
-            let mut str_collected = String::new();
-            while search_idx > 0 {
-                search_idx -= 1;
-                let t = &val_tokens[search_idx];
-                str_collected = t.content.to_string() + &str_collected;
-                if t.content == "!" {
-                    found_excl = true;
-                    break;
+        if let Some(pos) = important_idx {
+            if remaining_tokens[pos].content.to_lowercase() == "!important" {
+                important = true;
+                let imp_token_content = remaining_tokens[pos].content;
+                let after_imp: String = remaining_tokens[pos + 1..].iter().map(|t| t.content).collect();
+                remaining_tokens.truncate(pos);
+                let before_imp = spaces_from_end(&mut remaining_tokens);
+                let imp_raw = before_imp + imp_token_content + &after_imp;
+                if imp_raw != " !important" {
+                    important_raw = Some(imp_raw);
+                }
+            } else {
+                let mut cache = remaining_tokens.clone();
+                let mut str_collected = String::new();
+                let mut j = pos;
+                while j > 0 {
+                    let current_type = &cache[j].token_type;
+                    let trimmed = str_collected.trim_start();
+                    if trimmed.starts_with('!') && *current_type != TokenType::Space {
+                        break;
+                    }
+                    let popped = cache.pop().unwrap();
+                    str_collected = popped.content.to_string() + &str_collected;
+                    j -= 1;
+                }
+                if str_collected.trim_start().starts_with('!') {
+                    important = true;
+                    let after_imp: String = remaining_tokens[pos + 1..].iter().map(|t| t.content).collect();
+                    let imp_raw = str_collected + &after_imp;
+                    if imp_raw != " !important" {
+                        important_raw = Some(imp_raw);
+                    }
+                    remaining_tokens = cache;
                 }
             }
-            if found_excl {
-                important = true;
-                important_raw = Some(str_collected + "important");
-                val_tokens.truncate(search_idx);
-            }
         }
 
-        // Build raw value (preserving all tokens including comments)
-        let raw_value: String = val_tokens.iter().map(|t| t.content).collect();
+        let has_word = remaining_tokens.iter().any(|t| t.token_type != TokenType::Space && t.token_type != TokenType::Comment);
+        let final_tokens = if has_word {
+            let first_spaces_str: String = first_spaces.iter().map(|t| t.content).collect();
+            between.push_str(&first_spaces_str);
+            remaining_tokens
+        } else {
+            let mut ft = first_spaces;
+            ft.extend(remaining_tokens);
+            ft
+        };
+
+        let (value, value_raw) = clean_value(&final_tokens, custom_property);
+
+        if !custom_property && value.contains(':') {
+            let mut colon_idx = None;
+            let mut brackets = 0;
+            let mut prev_tok: Option<&Token<'a>> = None;
+            for (i, t) in val_tokens.iter().enumerate() {
+                if t.token_type == TokenType::Char('(') {
+                    brackets += 1;
+                } else if t.token_type == TokenType::Char(')') {
+                    if brackets > 0 {
+                        brackets -= 1;
+                    }
+                } else if brackets == 0 && t.token_type == TokenType::Char(':') {
+                    match prev_tok {
+                        None => {
+                            return Err(format!("Double colon:{}:{}", t.start, t.start + 1));
+                        }
+                        Some(p) => {
+                            if p.token_type == TokenType::Word && p.content == "progid" {
+                                // Ignore
+                            } else {
+                                colon_idx = Some(i);
+                                break;
+                            }
+                        }
+                    }
+                }
+                prev_tok = Some(t);
+            }
+
+            if let Some(c_idx) = colon_idx {
+                let mut word_token = &val_tokens[c_idx];
+                let mut founded = 0;
+                for j in (0..c_idx).rev() {
+                    if val_tokens[j].token_type != TokenType::Space {
+                        founded += 1;
+                        if founded == 2 {
+                            word_token = &val_tokens[j];
+                            break;
+                        }
+                    }
+                }
+                let offset = if word_token.token_type == TokenType::Word {
+                    word_token.end
+                } else {
+                    word_token.start
+                };
+                return Err(format!("Missed semicolon:{}", offset));
+            }
+        }
 
         let data = PostCssNodeData::Decl {
             prop,
-            value: raw_value.trim().to_string(),
-            raws_value: if raw_value != raw_value.trim() { Some(raw_value) } else { None },
+            value,
             important,
             raws_before: before_total,
             raws_between: between,
             raws_important: important_raw,
-            raws_semicolon: self.semicolon,
+            raws_value: value_raw,
         };
 
         let node_id = self.add_node(data, tokens[start_idx].start, map);
-        let end_offset = if let Some(last) = tokens.last() { last.end } else { tokens[start_idx].end };
-        self.nodes[node_id].source.end = Some(self.get_pos(end_offset, map));
-        // Restore outer semicolon state for parent rule/root
-        self.semicolon = outer_semicolon;
+        if end_offset == 0 {
+            let mut found_non_space = false;
+            for t in val_tokens.iter().rev() {
+                if t.token_type != TokenType::Space {
+                    end_offset = t.end;
+                    found_non_space = true;
+                    break;
+                }
+            }
+            if !found_non_space {
+                if between_end_idx > 0 {
+                    end_offset = tokens[between_end_idx - 1].end;
+                } else {
+                    end_offset = tokens[start_idx].end;
+                }
+            }
+        }
+        self.nodes[node_id].source.end = Some(self.get_end_pos(end_offset, map));
+        Ok(())
     }
 
     fn rule(&mut self, mut tokens: Vec<Token<'a>>, map: &LineColMap) {
@@ -934,33 +1066,26 @@ impl<'a> PostCssParser<'a> {
 
         let before = std::mem::take(&mut self.spaces);
         let between = spaces_and_comments_from_end(&mut tokens);
-        
-        // Build selector preserving all tokens (including comments)
-        let selector_raw: String = tokens.iter().map(|t| t.content).collect();
-        let selector: String = tokens.iter().filter(|t| t.token_type != TokenType::Comment).map(|t| t.content).collect();
-        
-        // Store raw selector if it has comments
-        let raws_selector = if selector_raw != selector { Some(selector_raw) } else { None };
+        let (selector, selector_raw) = clean_value(&tokens, false);
 
         let start_offset = tokens.first().map(|t| t.start).unwrap_or(0);
 
         let data = PostCssNodeData::Rule {
             selector,
-            raws_selector,
             nodes: Vec::new(),
             raws_before: before,
             raws_between: between,
             raws_after: None,
             raws_semicolon: false,
-            semicolon: false,
-            after: None,
+            raws_selector: selector_raw,
+            raws_own_semicolon: None,
         };
 
         let node_id = self.add_node(data, start_offset, map);
         self.current = node_id;
     }
 
-    pub fn parse(&mut self, map: &LineColMap) {
+    pub fn parse(&mut self, map: &LineColMap) -> Result<(), String> {
         while !self.end_of_file() {
             let token = self.next_token().unwrap().clone();
             match &token.token_type {
@@ -968,24 +1093,29 @@ impl<'a> PostCssParser<'a> {
                     self.spaces.push_str(token.content);
                 }
                 TokenType::Char(';') => {
-                    self.free_semicolon(&token);
+                    self.free_semicolon(&token, map);
                 }
                 TokenType::Char('}') => {
-                    self.end(&token, map);
+                    self.end(&token, map)?;
                 }
                 TokenType::Comment => {
                     self.comment(&token, map);
                 }
                 TokenType::AtWord => {
-                    self.atrule(&token, map);
+                    self.atrule(&token, map)?;
                 }
                 TokenType::Char('{') => {
                     self.rule(vec![token], map);
                 }
                 _ => {
-                    self.other(token, map);
+                    self.other(token, map)?;
                 }
             }
+        }
+
+        if self.current != 0 {
+            let start = &self.nodes[self.current].source.start;
+            return Err(format!("Unclosed block:{}:{}", start.offset, start.offset + 1));
         }
 
         let semicolon_val = self.semicolon;
@@ -999,6 +1129,7 @@ impl<'a> PostCssParser<'a> {
             _ => {}
         }
         self.nodes[0].source.end = Some(self.get_pos(self.css.len(), map));
+        Ok(())
     }
 }
 
@@ -1046,11 +1177,59 @@ fn spaces_from_end(tokens: &mut Vec<Token>) -> String {
     spaces
 }
 
+fn clean_value(tokens: &[Token], custom_property: bool) -> (String, Option<String>) {
+    let mut value = String::new();
+    let mut clean = true;
+    let length = tokens.len();
+    
+    for (i, token) in tokens.iter().enumerate() {
+        match token.token_type {
+            TokenType::Space if i == length - 1 && !custom_property => {
+                clean = false;
+            }
+            TokenType::Comment => {
+                let prev = if i > 0 { &tokens[i - 1].token_type } else { &TokenType::Space };
+                let next = if i + 1 < length { &tokens[i + 1].token_type } else { &TokenType::Space };
+                fn is_safe(t: &TokenType) -> bool {
+                    match t {
+                        TokenType::Space | TokenType::Char(';') | TokenType::Char('{') | TokenType::Char('}') | TokenType::Char(',') => true,
+                        _ => false
+                    }
+                }
+                if !is_safe(prev) && !is_safe(next) {
+                    if value.ends_with(',') {
+                        clean = false;
+                    } else {
+                        value.push_str(token.content);
+                    }
+                } else {
+                    clean = false;
+                }
+            }
+            _ => {
+                value.push_str(token.content);
+            }
+        }
+    }
+    
+    let raw = if !clean {
+        let raw_str: String = tokens.iter().map(|t| t.content).collect();
+        Some(raw_str)
+    } else {
+        None
+    };
+    
+    (value, raw)
+}
+
 #[napi]
 pub fn parse_css(css: String) -> String {
     let map = LineColMap::new(&css);
-    let mut parser = PostCssParser::new(&css, &map);
-    parser.parse(&map);
+    let mut parser = match PostCssParser::new(&css, &map) {
+        Ok(p) => p,
+        Err(_) => return "[]".to_string(),
+    };
+    let _ = parser.parse(&map);
     serde_json::to_string(&parser.nodes).unwrap()
 }
 
@@ -1118,7 +1297,7 @@ impl AstBufferBuilder {
 
 pub fn serialize_to_buffer(nodes: &[PostCssNode]) -> AstBuffer {
     let mut builder = AstBufferBuilder::new();
-
+    
     for node in nodes {
         let node_type = match &node.data {
             PostCssNodeData::Root { .. } => 0,
@@ -1127,12 +1306,12 @@ pub fn serialize_to_buffer(nodes: &[PostCssNode]) -> AstBuffer {
             PostCssNodeData::AtRule { .. } => 3,
             PostCssNodeData::Comment { .. } => 4,
         };
-
+        
         let parent_id = match node.parent {
             Some(pid) => pid as i32,
             None => -1,
         };
-
+        
         let start_offset = node.source.start.offset as i32;
         let end_offset = match &node.source.end {
             Some(ep) => ep.offset as i32,
@@ -1144,37 +1323,37 @@ pub fn serialize_to_buffer(nodes: &[PostCssNode]) -> AstBuffer {
             Some(ep) => (ep.line as i32, ep.column as i32),
             None => (0, 0),
         };
-
+        
         let mut important = 0;
         let mut semicolon = 0;
         let mut has_nodes = 0;
-
+        
         let mut slots = [(0, 0); 6];
-
+        
         match &node.data {
-            PostCssNodeData::Root { raws_after, raws_semicolon, nodes } => {
+            PostCssNodeData::Root { raws_after, raws_semicolon, .. } => {
                 slots[4] = builder.push_string(raws_after.as_deref().unwrap_or(""));
                 if *raws_semicolon { semicolon = 1; }
-                if !nodes.is_empty() { has_nodes = 1; }
+                has_nodes = 1;
             }
-            PostCssNodeData::Rule { selector, raws_selector, raws_before, raws_between, raws_after, raws_semicolon, nodes, .. } => {
+            PostCssNodeData::Rule { selector, raws_before, raws_between, raws_after, raws_semicolon, raws_selector, raws_own_semicolon, .. } => {
                 slots[0] = builder.push_string(selector);
-                slots[1] = builder.push_string(raws_selector.as_deref().unwrap_or(""));
+                slots[1] = builder.push_string(raws_own_semicolon.as_deref().unwrap_or(""));
                 slots[2] = builder.push_string(raws_before);
                 slots[3] = builder.push_string(raws_between);
                 slots[4] = builder.push_string(raws_after.as_deref().unwrap_or(""));
+                slots[5] = builder.push_string(raws_selector.as_deref().unwrap_or(""));
                 if *raws_semicolon { semicolon = 1; }
-                if !nodes.is_empty() { has_nodes = 1; }
+                has_nodes = 1;
             }
-            PostCssNodeData::Decl { prop, value, raws_value, important: imp, raws_before, raws_between, raws_important, raws_semicolon } => {
+            PostCssNodeData::Decl { prop, value, important: imp, raws_before, raws_between, raws_important, raws_value } => {
                 slots[0] = builder.push_string(prop);
                 slots[1] = builder.push_string(value);
                 slots[2] = builder.push_string(raws_before);
                 slots[3] = builder.push_string(raws_between);
-                slots[4] = builder.push_string(raws_value.as_deref().unwrap_or(value));
+                slots[4] = builder.push_string(raws_value.as_deref().unwrap_or(""));
                 slots[5] = builder.push_string(raws_important.as_deref().unwrap_or(""));
                 if *imp { important = 1; }
-                if *raws_semicolon { semicolon = 1; }
             }
             PostCssNodeData::AtRule { name, params, raws_before, raws_between, raws_after, raws_after_name, raws_semicolon, nodes } => {
                 slots[0] = builder.push_string(name);
@@ -1193,7 +1372,7 @@ pub fn serialize_to_buffer(nodes: &[PostCssNode]) -> AstBuffer {
                 slots[4] = builder.push_string(raws_right);
             }
         }
-
+        
         builder.add_node(
             node_type,
             parent_id,
@@ -1208,142 +1387,25 @@ pub fn serialize_to_buffer(nodes: &[PostCssNode]) -> AstBuffer {
             has_nodes,
             &slots,
         );
-    #[napi]
-    pub fn parse_css(css: String) -> String {
-        let map = LineColMap::new(&css);
-        let mut parser = PostCssParser::new(&css, &map);
-        parser.parse(&map);
-        serde_json::to_string(&parser.nodes).unwrap()
     }
-
-    #[napi]
-    pub fn parse_css_to_buffer(css: String) -> AstBuffer {
-        let map = LineColMap::new(&css);
-        let mut parser = PostCssParser::new(&css, &map);
-        parser.parse(&map);
-        serialize_to_buffer(&parser.nodes)
+    
+    AstBuffer {
+        metadata: Int32Array::from(builder.metadata),
+        big_string: builder.big_string,
     }
-
-    #[napi]
-    pub fn parse_css_napi(env: Env, css: String) -> Result<Object> {
-        use napi::{Object, Result};
-        let map = LineColMap::new(&css);
-        let mut parser = PostCssParser::new(&css, &map);
-        parser.parse(&map);
-
-        // Convert parser nodes to RawNode format for napi AST building
-        let raw_nodes = convert_to_raw_nodes(
-            &parser.nodes.iter().map(|n| n.id).collect::<Vec<_>>(),
-            &parser.nodes,
-        );
-        build_raw_node(env, &raw_nodes[0])
-        }
-
-        fn convert_to_raw_nodes(node_ids: &[usize], all_nodes: &[PostCssNode]) -> Vec<RawNode> {
-    node_ids.iter().map(|id| convert_node(&all_nodes[*id], all_nodes)).collect()
 }
 
-fn convert_node(node: &PostCssNode, all_nodes: &[PostCssNode]) -> RawNode {
-    let r#type = match &node.data {
-        PostCssNodeData::Root { .. } => "root",
-        PostCssNodeData::Rule { .. } => "rule",
-        PostCssNodeData::Decl { .. } => "decl",
-        PostCssNodeData::AtRule { .. } => "atrule",
-        PostCssNodeData::Comment { .. } => "comment",
-    }.to_string();
-
-    let source = SourceInfo {
-        start: SourcePos {
-            line: node.source.start.line as u32,
-            column: node.source.start.column as u32,
-            offset: node.source.start.offset as usize,
-        },
-        end: node.source.end.as_ref().map(|ep| SourcePos {
-            line: ep.line as u32,
-            column: ep.column as u32,
-            offset: ep.offset as usize,
-        }),
+#[napi]
+pub fn parse_css_to_buffer(css: String) -> Result<AstBuffer, napi::Error> {
+    let map = LineColMap::new(&css);
+    let mut parser = match PostCssParser::new(&css, &map) {
+        Ok(p) => p,
+        Err(err) => return Err(napi::Error::new(napi::Status::GenericFailure, err)),
     };
-
-    let nodes = if let PostCssNodeData::Root { nodes, .. } = &node.data {
-        Some(convert_to_raw_nodes(nodes, all_nodes))
-    } else if let PostCssNodeData::Rule { nodes, .. } = &node.data {
-        Some(convert_to_raw_nodes(nodes, all_nodes))
-    } else if let PostCssNodeData::AtRule { nodes, .. } = &node.data {
-        nodes.as_ref().map(|n| convert_to_raw_nodes(n, all_nodes))
-    } else {
-        None
-    };
-
-    let mut raw = RawNode {
-        r#type,
-        source,
-        nodes,
-        // Root
-        raws_after: None,
-        raws_semicolon: None,
-        // Rule
-        selector: None,
-        raws_selector: None,
-        raws_before: None,
-        raws_between: None,
-        // Decl
-        prop: None,
-        value: None,
-        important: None,
-        raws_value: None,
-        raws_important: None,
-        // AtRule
-        name: None,
-        params: None,
-        raws_after_name: None,
-        // Comment
-        text: None,
-        raws_left: None,
-        raws_right: None,
-    };
-
-    match &node.data {
-        PostCssNodeData::Root { raws_after, raws_semicolon, .. } => {
-            raw.raws_after = raws_after.clone();
-            raw.raws_semicolon = Some(*raws_semicolon);
-        }
-        PostCssNodeData::Rule { selector, raws_selector, raws_before, raws_between, raws_after, raws_semicolon, .. } => {
-            raw.selector = Some(selector.clone());
-            raw.raws_selector = raws_selector.clone();
-            raw.raws_before = Some(raws_before.clone());
-            raw.raws_between = Some(raws_between.clone());
-            raw.raws_after = raws_after.clone();
-            raw.raws_semicolon = Some(*raws_semicolon);
-        }
-        PostCssNodeData::Decl { prop, value, raws_value, important, raws_before, raws_between, raws_important, raws_semicolon } => {
-            raw.prop = Some(prop.clone());
-            raw.value = Some(value.clone());
-            raw.raws_value = raws_value.clone();
-            raw.important = Some(*important);
-            raw.raws_before = Some(raws_before.clone());
-            raw.raws_between = Some(raws_between.clone());
-            raw.raws_important = raws_important.clone();
-            raw.raws_semicolon = Some(*raws_semicolon);
-        }
-        PostCssNodeData::AtRule { name, params, raws_before, raws_between, raws_after, raws_after_name, raws_semicolon, .. } => {
-            raw.name = Some(name.clone());
-            raw.params = Some(params.clone());
-            raw.raws_before = Some(raws_before.clone());
-            raw.raws_between = Some(raws_between.clone());
-            raw.raws_after = raws_after.clone();
-            raw.raws_after_name = Some(raws_after_name.clone());
-            raw.raws_semicolon = Some(*raws_semicolon);
-        }
-        PostCssNodeData::Comment { text, raws_before, raws_left, raws_right } => {
-            raw.text = Some(text.clone());
-            raw.raws_before = Some(raws_before.clone());
-            raw.raws_left = Some(raws_left.clone());
-            raw.raws_right = Some(raws_right.clone());
-        }
+    if let Err(err) = parser.parse(&map) {
+        return Err(napi::Error::new(napi::Status::GenericFailure, err));
     }
-
-    raw
+    Ok(serialize_to_buffer(&parser.nodes))
 }
 
 #[cfg(test)]
@@ -1377,12 +1439,12 @@ mod tests {
         println!("LineColMap creation: {} ms", start.elapsed().as_millis());
 
         let start = Instant::now();
-        let tokens = tokenize(&css);
+        let tokens = tokenize(&css).unwrap();
         println!("Tokenize: {} ms ({} tokens)", start.elapsed().as_millis(), tokens.len());
 
         let start = Instant::now();
-        let mut parser = PostCssParser::new(&css, &map);
-        parser.parse(&map);
+        let mut parser = PostCssParser::new(&css, &map).unwrap();
+        let _ = parser.parse(&map);
         println!("Parse: {} ms ({} nodes)", start.elapsed().as_millis(), parser.nodes.len());
 
         let start = Instant::now();

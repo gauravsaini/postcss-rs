@@ -312,9 +312,5 @@ if (!nativeBinding) {
 
 const { parseCss, parseCssToBuffer } = nativeBinding
 
-const { parse } = require('./bridge.js');
-
 module.exports.parseCss = parseCss
 module.exports.parseCssToBuffer = parseCssToBuffer
-module.exports.parse = parse
-module.exports.nativeParseCss = (css) => parseCssToBuffer(css.toString()).metadata
