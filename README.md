@@ -4,7 +4,7 @@ High-performance Rust-based parser for CSS, compiled to a native Node.js addon u
 
 ## 🚀 Architecture & High-Level Design (HLD)
 
-The traditional method of interfacing between Rust parsers and JavaScript is to parse CSS into a tree structures in Rust, serialize the entire tree to JSON, and deserialize it on the Node.js side. However, the CPU serialization/deserialization overhead on large CSS files can completely negate any parsing speed gains.
+The traditional method of interfacing between Rust parsers and JavaScript is to parse CSS into tree structures in Rust, serialize the entire tree to JSON, and deserialize it on the Node.js side. However, the CPU serialization/deserialization overhead on large CSS files can completely negate any parsing speed gains.
 
 To resolve this bottleneck, `postcss-rs` utilizes a **Flat Shared-Memory Buffer** design:
 
@@ -63,6 +63,21 @@ Each parsed CSS node occupies exactly **23 contiguous `i32` slots** in the `meta
   - **Type 3 (AtRule)**: Slots for `name`, `params`, `before`, `between`, `after`, and `afterName`.
   - **Type 4 (Comment)**: Slots for `text`, `unused`, `before`, `left`, and `right` space.
 
+## ⚡ Performance & Benchmark Results
+
+Benchmark results on a **1.63 MB CSS document** (64,480 lines of CSS / 16,160 top-level rules):
+
+| Parser Engine / Mode | Execution Time (ms) | Speedup vs JS PostCSS |
+| :--- | :---: | :---: |
+| **Original PostCSS (Pure JS)** | **62.41 ms** | 1.0x (Baseline) |
+| **Raw Rust Parser (Native Buffer)** | **16.80 ms** | **3.7x faster** ⚡ |
+| **Drop-in Replacement (`postcss-rs`)** | **37.50 ms** | **1.7x faster** 🚀 |
+
+### Key Optimizations
+- **`mimalloc` Allocator Integration**: Configured Microsoft's `mimalloc` as global Rust allocator (`#[global_allocator]`), minimizing native heap allocation latency.
+- **$\mathcal{O}(1)$ Lookup Table (LUT) Tokenization**: Static 256-byte character classification tables (`IS_WORD_STOP`, `IS_AT_STOP`) eliminate branching overhead during word boundary detection.
+- **Fast Prototype Re-hydration**: JS bridge uses `Object.create(Prototype)` fast instantiation to bypass JS constructor overhead when materializing 50,000+ AST nodes.
+
 ## 📦 Getting Started
 
 ### Prerequisites
@@ -70,7 +85,7 @@ Each parsed CSS node occupies exactly **23 contiguous `i32` slots** in the `meta
 - Rust toolchain (cargo, rustc)
 
 ### Installation
-Clone the repository and install the development dependencies:
+Clone the repository and install dependencies:
 ```bash
 pnpm install
 ```
@@ -78,22 +93,22 @@ pnpm install
 ### Building the Native Addon
 To build the optimized release target:
 ```bash
-npm run build
+pnpm run build
 ```
 
 To build a debug version:
 ```bash
-npm run build:debug
+pnpm run build:debug
 ```
 
 ### Running Benchmarks
-We have included a benchmark suite to compare the speed of the original PostCSS JS parser against `postcss-rs`:
+Run the benchmark suite comparing JS PostCSS vs `postcss-rs`:
 ```bash
 node benchmark.js
 ```
 
 ## 🧪 Testing and Verification
-Unit tests are fully integrated and run against the entire PostCSS test suite to ensure exact parser parity:
+Run the comprehensive AST parity and error verification suite:
 ```bash
-npm test
+pnpm test
 ```

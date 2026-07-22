@@ -2,12 +2,12 @@ const { parseCssToBuffer } = require('./index.js');
 
 function parse(css, opts, classes) {
   const { Root, Rule, Declaration, AtRule, Comment, Input } = classes || {
-    Root: require('../postcss/lib/root'),
-    Rule: require('../postcss/lib/rule'),
-    Declaration: require('../postcss/lib/declaration'),
-    AtRule: require('../postcss/lib/at-rule'),
-    Comment: require('../postcss/lib/comment'),
-    Input: require('../postcss/lib/input')
+    Root: require('postcss/lib/root'),
+    Rule: require('postcss/lib/rule'),
+    Declaration: require('postcss/lib/declaration'),
+    AtRule: require('postcss/lib/at-rule'),
+    Comment: require('postcss/lib/comment'),
+    Input: require('postcss/lib/input')
   };
   const cssStr = css.toString();
   const input = new Input(cssStr, opts);
@@ -104,98 +104,105 @@ function parse(css, opts, classes) {
   const totalNodes = metadata.length / 23;
   const jsNodes = new Array(totalNodes);
 
-  // Helper to extract a string dynamically
-  function getString(nodeIdx, slotIdx) {
-    const idx = nodeIdx * 23 + 11 + slotIdx * 2;
-    const offset = metadata[idx];
-    const length = metadata[idx + 1];
-    if (length === 0) return '';
-    return bigString.substring(offset, offset + length);
+  const RootProto = Root.prototype;
+  const RuleProto = Rule.prototype;
+  const DeclProto = Declaration.prototype;
+  const AtRuleProto = AtRule.prototype;
+  const CommentProto = Comment.prototype;
+
+  function getStr(off, len) {
+    return len === 0 ? '' : bigString.substring(off, off + len);
   }
 
-  // Create JS node instances with lazy getters/properties
   for (let i = 0; i < totalNodes; i++) {
     const offset = i * 23;
     const nodeType = metadata[offset];
     
     let jsNode;
     if (nodeType === 0) { // Root
-      jsNode = new Root();
+      jsNode = Object.create(RootProto);
+      jsNode.type = 'root';
       jsNode.raws = {
-        after: getString(i, 4)
+        after: getStr(metadata[offset + 19], metadata[offset + 20])
       };
       if (metadata[offset + 10] === 1) {
         jsNode.nodes = [];
       }
     } else if (nodeType === 1) { // Rule
-      jsNode = new Rule();
-      jsNode.selector = getString(i, 0);
+      jsNode = Object.create(RuleProto);
+      jsNode.type = 'rule';
+      jsNode.selector = getStr(metadata[offset + 11], metadata[offset + 12]);
       jsNode.raws = {
-        before: getString(i, 2),
-        between: getString(i, 3),
-        after: getString(i, 4)
+        before: getStr(metadata[offset + 15], metadata[offset + 16]),
+        between: getStr(metadata[offset + 17], metadata[offset + 18]),
+        after: getStr(metadata[offset + 19], metadata[offset + 20])
       };
-      const ownSemicolon = getString(i, 1);
-      if (ownSemicolon) {
-        jsNode.raws.ownSemicolon = ownSemicolon;
+      const ownSemiLen = metadata[offset + 14];
+      if (ownSemiLen > 0) {
+        jsNode.raws.ownSemicolon = bigString.substring(metadata[offset + 13], metadata[offset + 13] + ownSemiLen);
       }
-      const selectorRaw = getString(i, 5);
-      if (selectorRaw) {
+      const selRawLen = metadata[offset + 22];
+      if (selRawLen > 0) {
         jsNode.raws.selector = {
           value: jsNode.selector,
-          raw: selectorRaw
+          raw: bigString.substring(metadata[offset + 21], metadata[offset + 21] + selRawLen)
         };
       }
       if (metadata[offset + 10] === 1) {
         jsNode.nodes = [];
       }
     } else if (nodeType === 2) { // Decl
-      jsNode = new Declaration();
-      jsNode.prop = getString(i, 0);
-      jsNode.value = getString(i, 1);
+      jsNode = Object.create(DeclProto);
+      jsNode.type = 'decl';
+      jsNode.prop = getStr(metadata[offset + 11], metadata[offset + 12]);
+      jsNode.value = getStr(metadata[offset + 13], metadata[offset + 14]);
       if (metadata[offset + 8] === 1) {
         jsNode.important = true;
       }
       jsNode.raws = {
-        before: getString(i, 2),
-        between: getString(i, 3)
+        before: getStr(metadata[offset + 15], metadata[offset + 16]),
+        between: getStr(metadata[offset + 17], metadata[offset + 18])
       };
-      const valueRaw = getString(i, 4);
-      if (valueRaw) {
+      const valRawLen = metadata[offset + 20];
+      if (valRawLen > 0) {
         jsNode.raws.value = {
           value: jsNode.value,
-          raw: valueRaw
+          raw: bigString.substring(metadata[offset + 19], metadata[offset + 19] + valRawLen)
         };
       }
-      const importantRaw = getString(i, 5);
-      if (importantRaw && importantRaw !== ' !important') {
-        jsNode.raws.important = importantRaw;
+      const impRawLen = metadata[offset + 22];
+      if (impRawLen > 0) {
+        const importantRaw = bigString.substring(metadata[offset + 21], metadata[offset + 21] + impRawLen);
+        if (importantRaw !== ' !important') {
+          jsNode.raws.important = importantRaw;
+        }
       }
     } else if (nodeType === 3) { // AtRule
-      jsNode = new AtRule();
-      jsNode.name = getString(i, 0);
-      jsNode.params = getString(i, 1);
+      jsNode = Object.create(AtRuleProto);
+      jsNode.type = 'atrule';
+      jsNode.name = getStr(metadata[offset + 11], metadata[offset + 12]);
+      jsNode.params = getStr(metadata[offset + 13], metadata[offset + 14]);
       jsNode.raws = {
-        before: getString(i, 2),
-        between: getString(i, 3),
-        afterName: getString(i, 5)
+        before: getStr(metadata[offset + 15], metadata[offset + 16]),
+        between: getStr(metadata[offset + 17], metadata[offset + 18]),
+        afterName: getStr(metadata[offset + 21], metadata[offset + 22])
       };
       if (metadata[offset + 10] === 1) {
         jsNode.nodes = [];
-        jsNode.raws.after = getString(i, 4);
+        jsNode.raws.after = getStr(metadata[offset + 19], metadata[offset + 20]);
       }
     } else if (nodeType === 4) { // Comment
-      jsNode = new Comment();
-      jsNode.text = getString(i, 0);
+      jsNode = Object.create(CommentProto);
+      jsNode.type = 'comment';
+      jsNode.text = getStr(metadata[offset + 11], metadata[offset + 12]);
       jsNode.raws = {
-        before: getString(i, 2),
-        left: getString(i, 3),
-        right: getString(i, 4)
+        before: getStr(metadata[offset + 15], metadata[offset + 16]),
+        left: getStr(metadata[offset + 17], metadata[offset + 18]),
+        right: getStr(metadata[offset + 19], metadata[offset + 20])
       };
     }
 
     // Source mapping
-    const endOffset = metadata[offset + 3];
     const endLine = metadata[offset + 6];
     jsNode.source = {
       input,
@@ -209,21 +216,21 @@ function parse(css, opts, classes) {
       jsNode.source.end = {
         line: endLine,
         column: metadata[offset + 7],
-        offset: endOffset
+        offset: metadata[offset + 3]
       };
     }
 
     jsNodes[i] = jsNode;
-  }
 
-  // Link parents and children
-  for (let i = 1; i < totalNodes; i++) {
-    const parentId = metadata[i * 23 + 1];
+    // Link parent & semicolon
+    const parentId = metadata[offset + 1];
     if (parentId >= 0) {
       const parentNode = jsNodes[parentId];
-      const childNode = jsNodes[i];
-      childNode.parent = parentNode;
-      parentNode.nodes.push(childNode);
+      jsNode.parent = parentNode;
+      parentNode.nodes.push(jsNode);
+      if (metadata[offset + 9] === 1 && (nodeType === 1 || nodeType === 3)) {
+        // Trailing semicolon setting
+      }
     }
   }
 

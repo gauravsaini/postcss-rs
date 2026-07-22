@@ -1,4 +1,4 @@
-const originalParse = require('../postcss/lib/parse.js');
+const originalParse = require('postcss/lib/parse');
 const postcssRs = require('./bridge.js');
 
 const testCases = [

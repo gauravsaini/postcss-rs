@@ -12,10 +12,11 @@
   },
   "scripts": {
     "build": "napi build --platform --release",
-    "build:debug": "napi build --platform"
+    "build:debug": "napi build --platform",
+    "test": "node test_all.js && node validate.js"
   },
   "devDependencies": {
     "@napi-rs/cli": "^2.18.0",
-    "postcss": "file:../postcss"
+    "postcss": "^8.4.38"
   }
 }

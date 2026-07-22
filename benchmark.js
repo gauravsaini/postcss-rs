@@ -1,5 +1,5 @@
 const postcssRs = require('./bridge.js');
-const postcssOriginalParse = require('../postcss/lib/parse.js');
+const postcssOriginalParse = require('postcss/lib/parse');
 
 console.log("Generating large mock CSS document...");
 

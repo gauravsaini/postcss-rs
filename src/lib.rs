@@ -2,6 +2,9 @@ use serde::Serialize;
 use napi_derive::napi;
 use napi::bindgen_prelude::Int32Array;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenType {
     Space,
@@ -21,8 +24,54 @@ pub struct Token<'a> {
     pub end: usize,
 }
 
+static IS_WORD_STOP: [bool; 256] = {
+    let mut table = [false; 256];
+    table[b'\t' as usize] = true;
+    table[b'\n' as usize] = true;
+    table[b'\x0c' as usize] = true;
+    table[b'\r' as usize] = true;
+    table[b' ' as usize] = true;
+    table[b'!' as usize] = true;
+    table[b'"' as usize] = true;
+    table[b'#' as usize] = true;
+    table[b'\'' as usize] = true;
+    table[b'(' as usize] = true;
+    table[b')' as usize] = true;
+    table[b':' as usize] = true;
+    table[b';' as usize] = true;
+    table[b'@' as usize] = true;
+    table[b'[' as usize] = true;
+    table[b'\\' as usize] = true;
+    table[b']' as usize] = true;
+    table[b'{' as usize] = true;
+    table[b'}' as usize] = true;
+    table
+};
+
+static IS_AT_STOP: [bool; 256] = {
+    let mut table = [false; 256];
+    table[b'\t' as usize] = true;
+    table[b'\n' as usize] = true;
+    table[b'\x0c' as usize] = true;
+    table[b'\r' as usize] = true;
+    table[b' ' as usize] = true;
+    table[b'"' as usize] = true;
+    table[b'#' as usize] = true;
+    table[b'\'' as usize] = true;
+    table[b'(' as usize] = true;
+    table[b')' as usize] = true;
+    table[b'/' as usize] = true;
+    table[b';' as usize] = true;
+    table[b'[' as usize] = true;
+    table[b'\\' as usize] = true;
+    table[b']' as usize] = true;
+    table[b'{' as usize] = true;
+    table[b'}' as usize] = true;
+    table
+};
+
 pub fn tokenize<'a>(css: &'a str) -> Result<Vec<Token<'a>>, String> {
-    let mut tokens = Vec::new();
+    let mut tokens = Vec::with_capacity(css.len() / 5);
     let bytes = css.as_bytes();
     let len = bytes.len();
     let mut pos = 0;
@@ -59,7 +108,7 @@ pub fn tokenize<'a>(css: &'a str) -> Result<Vec<Token<'a>>, String> {
             b'(' => {
                 let mut is_url = false;
                 if let Some(prev) = tokens.last() {
-                    if prev.token_type == TokenType::Word && prev.content.to_lowercase() == "url" {
+                    if prev.token_type == TokenType::Word && prev.content.eq_ignore_ascii_case("url") {
                         is_url = true;
                     }
                 }
@@ -204,13 +253,8 @@ pub fn tokenize<'a>(css: &'a str) -> Result<Vec<Token<'a>>, String> {
             b'@' => {
                 let start = pos;
                 pos += 1;
-                while pos < len {
-                    match bytes[pos] {
-                        b'\t' | b'\n' | b'\x0c' | b'\r' | b' ' | b'"' | b'#' | b'\'' | b'(' | b')' | b'/' | b';' | b'[' | b'\\' | b']' | b'{' | b'}' => {
-                            break;
-                        }
-                        _ => pos += 1,
-                    }
+                while pos < len && !IS_AT_STOP[bytes[pos] as usize] {
+                    pos += 1;
                 }
                 tokens.push(Token {
                     token_type: TokenType::AtWord,
@@ -275,18 +319,13 @@ pub fn tokenize<'a>(css: &'a str) -> Result<Vec<Token<'a>>, String> {
                     let start = pos;
                     pos += 1;
                     while pos < len {
-                        match bytes[pos] {
-                            b'\t' | b'\n' | b'\x0c' | b'\r' | b' ' | b'!' | b'"' | b'#' | b'\'' | b'(' | b')' | b':' | b';' | b'@' | b'[' | b'\\' | b']' | b'{' | b'}' => {
-                                break;
-                            }
-                            b'/' => {
-                                if pos + 1 < len && bytes[pos + 1] == b'*' {
-                                    break;
-                                }
-                                pos += 1;
-                            }
-                            _ => pos += 1,
+                        if IS_WORD_STOP[bytes[pos] as usize] {
+                            break;
                         }
+                        if bytes[pos] == b'/' && pos + 1 < len && bytes[pos + 1] == b'*' {
+                            break;
+                        }
+                        pos += 1;
                     }
                     tokens.push(Token {
                         token_type: TokenType::Word,
@@ -300,18 +339,13 @@ pub fn tokenize<'a>(css: &'a str) -> Result<Vec<Token<'a>>, String> {
                 let start = pos;
                 pos += 1;
                 while pos < len {
-                    match bytes[pos] {
-                        b'\t' | b'\n' | b'\x0c' | b'\r' | b' ' | b'!' | b'"' | b'#' | b'\'' | b'(' | b')' | b':' | b';' | b'@' | b'[' | b'\\' | b']' | b'{' | b'}' => {
-                            break;
-                        }
-                        b'/' => {
-                            if pos + 1 < len && bytes[pos + 1] == b'*' {
-                                break;
-                            }
-                            pos += 1;
-                        }
-                        _ => pos += 1,
+                    if IS_WORD_STOP[bytes[pos] as usize] {
+                        break;
                     }
+                    if bytes[pos] == b'/' && pos + 1 < len && bytes[pos + 1] == b'*' {
+                        break;
+                    }
+                    pos += 1;
                 }
                 tokens.push(Token {
                     token_type: TokenType::Word,
@@ -419,29 +453,41 @@ pub struct PostCssNode {
 
 pub struct LineColMap {
     line_starts: Vec<usize>,
+    last_hint: std::cell::Cell<usize>,
 }
 
 impl LineColMap {
     pub fn new(s: &str) -> Self {
+        let bytes = s.as_bytes();
         let mut line_starts = vec![0];
-        for (i, c) in s.char_indices() {
-            if c == '\n' {
+        for (i, &b) in bytes.iter().enumerate() {
+            if b == b'\n' {
                 line_starts.push(i + 1);
             }
         }
-        Self { line_starts }
+        Self {
+            line_starts,
+            last_hint: std::cell::Cell::new(0),
+        }
     }
 
     pub fn get(&self, offset: usize) -> (u32, u32) {
-        match self.line_starts.binary_search(&offset) {
-            Ok(idx) => ((idx + 1) as u32, 1),
-            Err(idx) => {
-                let line = idx as u32;
-                let start = self.line_starts[idx - 1];
-                let col = (offset - start + 1) as u32;
-                (line, col)
-            }
+        let len = self.line_starts.len();
+        let mut hint = self.last_hint.get();
+        if hint >= len {
+            hint = len.saturating_sub(1);
         }
+        while hint + 1 < len && self.line_starts[hint + 1] <= offset {
+            hint += 1;
+        }
+        while hint > 0 && self.line_starts[hint] > offset {
+            hint -= 1;
+        }
+        self.last_hint.set(hint);
+        let line = (hint + 1) as u32;
+        let start = self.line_starts[hint];
+        let col = (offset - start + 1) as u32;
+        (line, col)
     }
 }
 
@@ -462,7 +508,7 @@ impl<'a> PostCssParser<'a> {
             css,
             tokens,
             token_idx: 0,
-            nodes: Vec::new(),
+            nodes: Vec::with_capacity(css.len() / 25),
             spaces: String::new(),
             semicolon: false,
             current: 0,
@@ -1245,10 +1291,10 @@ pub struct AstBufferBuilder {
 }
 
 impl AstBufferBuilder {
-    pub fn new() -> Self {
+    pub fn with_capacity(nodes_count: usize, css_len: usize) -> Self {
         Self {
-            metadata: Vec::new(),
-            big_string: String::new(),
+            metadata: Vec::with_capacity(nodes_count * 23),
+            big_string: String::with_capacity(css_len),
         }
     }
 
@@ -1296,7 +1342,7 @@ impl AstBufferBuilder {
 }
 
 pub fn serialize_to_buffer(nodes: &[PostCssNode]) -> AstBuffer {
-    let mut builder = AstBufferBuilder::new();
+    let mut builder = AstBufferBuilder::with_capacity(nodes.len(), nodes.len() * 32);
     
     for node in nodes {
         let node_type = match &node.data {
