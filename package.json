@@ -5,7 +5,7 @@
   "main": "index.js",
   "types": "index.d.ts",
   "napi": {
-    "binaryName": "postcss_rs",
+    "binaryName": "index",
     "targets": [
       "x86_64-apple-darwin",
       "aarch64-apple-darwin",

@@ -19,18 +19,25 @@ jobs:
         include:
           - target: x86_64-apple-darwin
             os: macos-latest
+            use_zig: false
           - target: aarch64-apple-darwin
             os: macos-latest
+            use_zig: false
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
+            use_zig: false
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
+            use_zig: true
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
+            use_zig: true
           - target: x86_64-pc-windows-msvc
             os: windows-latest
+            use_zig: false
           - target: aarch64-pc-windows-msvc
             os: windows-latest
+            use_zig: false
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -42,13 +49,17 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Setup Zig
+        if: ${{ matrix.use_zig }}
+        uses: goto-bus-stop/setup-zig@v2
+
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v3
+        uses: pnpm/action-setup@v4
         with:
           version: 9
 
@@ -59,9 +70,14 @@ jobs:
           cache: 'pnpm'
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install
 
-      - name: Build target binary
+      - name: Build target binary (Zig)
+        if: ${{ matrix.use_zig }}
+        run: pnpm exec napi build --platform --target ${{ matrix.target }} --release --zig
+
+      - name: Build target binary (Native)
+        if: ${{ !matrix.use_zig }}
         run: pnpm exec napi build --platform --target ${{ matrix.target }} --release
 
       - name: Upload artifact
@@ -80,7 +96,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v3
+        uses: pnpm/action-setup@v4
         with:
           version: 9
 
@@ -92,7 +108,7 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install
 
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
