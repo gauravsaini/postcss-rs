@@ -129,6 +129,45 @@ Run fuzz testing separately with a custom seed for reproducibility:
 FUZZ_SEED=42 FUZZ_ITERATIONS=1000 node test_fuzz.js
 ```
 
+## 🔌 PostCSS Plugin Ecosystem Compatibility
+
+`@gauravsaini/postcss-rs` is 100% compatible out-of-the-box with the entire PostCSS plugin ecosystem.
+
+Because `@gauravsaini/postcss-rs` rehydrates its Rust memory buffer directly into standard PostCSS AST class instances (`Root`, `Rule`, `Declaration`, `AtRule`, `Comment`), plugins inherit all standard AST traversal and mutation methods seamlessly (`walkRules`, `walkDecls`, `append`, `replaceWith`, `clone`, `toString`, etc.).
+
+### Supported Plugin Categories out-of-the-box:
+- **Future CSS & Prefixes**: `autoprefixer`, `postcss-preset-env`
+- **Component & Selector Isolation**: `postcss-modules`, `react-css-modules`, `postcss-initial`, `postcss-autoreset`, `cq-prolyfill`
+- **Preprocessing & Nesting**: `postcss-nested`, `postcss-sorting`, `postcss-utilities`, `short`
+- **Assets & Media**: `postcss-url`, `postcss-sprites`, `font-magician`, `postcss-inline-svg`, `webp-in-css`, `avif-in-css`
+- **Linters & Diagnostics**: `stylelint`, `doiuse`, `colorguard`
+- **Minifiers & Language Utilities**: `cssnano`, `lost`, `rtlcss`
+
+### Using with PostCSS Plugins
+
+```javascript
+const postcss = require('postcss');
+const postcssRs = require('@gauravsaini/postcss-rs');
+const autoprefixer = require('autoprefixer');
+const postcssNested = require('postcss-nested');
+const cssnano = require('cssnano');
+
+const css = `
+.card {
+  display: flex;
+  user-select: none;
+  & .title { font-size: 1.2rem; }
+}
+`;
+
+// Pass postcssRs.parse as the parser option to PostCSS
+postcss([postcssNested(), autoprefixer(), cssnano()])
+  .process(css, { parser: postcssRs.parse, from: 'input.css' })
+  .then(result => {
+    console.log(result.css);
+  });
+```
+
 ## 🤖 CI/CD & npm Publishing
 
 Automated testing, cross-compilation, and npm releases are configured via GitHub Actions:
