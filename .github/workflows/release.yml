@@ -36,8 +36,8 @@ jobs:
             os: windows-latest
             use_zig: false
           - target: aarch64-pc-windows-msvc
-            os: windows-latest
-            use_zig: false
+            os: ubuntu-latest
+            use_zig: true
     runs-on: ${{ matrix.os }}
 
     steps:
