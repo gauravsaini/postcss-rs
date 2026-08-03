@@ -128,3 +128,22 @@ Run fuzz testing separately with a custom seed for reproducibility:
 ```bash
 FUZZ_SEED=42 FUZZ_ITERATIONS=1000 node test_fuzz.js
 ```
+
+## 🤖 CI/CD & npm Publishing
+
+Automated testing, cross-compilation, and npm releases are configured via GitHub Actions:
+
+- **Continuous Integration (`.github/workflows/ci.yml`)**: Runs linting, native build, and the full test suite across macOS, Linux, and Windows on every PR and main branch push.
+- **Automated Publishing (`.github/workflows/release.yml`)**: Triggered when a new git tag (e.g. `v1.0.0`) is pushed or manually via `workflow_dispatch`.
+  - Matrix builds native `.node` binaries for 7 target architectures (macOS x64/arm64, Linux x64/arm64 gnu/musl, Windows x64/arm64).
+  - Downloads built binaries, runs verification tests against all target binaries, and publishes the package to npm using `NPM_TOKEN`.
+  - Automatically creates a GitHub Release with attached native binary artifacts.
+
+### Releasing a New Version
+1. Ensure your working directory is clean and tests pass (`pnpm test`).
+2. Tag and push a release:
+   ```bash
+   git tag v1.0.1
+   git push origin v1.0.1
+   ```
+3. GitHub Actions will build native binaries for all platforms and publish to npm automatically.
