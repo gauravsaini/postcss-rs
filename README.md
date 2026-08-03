@@ -11,7 +11,7 @@ To resolve this bottleneck, `postcss-rs` utilizes a **Flat Shared-Memory Buffer*
 1. **Rust parsing**: The Rust tokenizer and parser processes the CSS string and constructs raw CSS node boundaries and settings.
 2. **Buffer Serialization**: Instead of sending a deep nested object structure, Rust serializes all node structural information into a single 1D flat integer array (`Int32Array` called `metadata`).
 3. **Strings Packing**: All dynamic strings (such as selectors, property names, rule/decl values, spaces, and raws formatting tokens) are concatenated into one massive single string (`bigString`).
-4. **NAPI Boundary Transfer**: Node.js receives the zero-copy flat metadata buffer and the packed string, and reconstructs the standard PostCSS JS AST classes (`Root`, `Rule`, `Declaration`, `AtRule`, `Comment`) by simple array index offsets and substring extraction.
+4. **NAPI Boundary Transfer**: Node.js receives the flat metadata buffer (transferred zero-copy via NAPI `ArrayBuffer`) and the packed string (copied across the NAPI boundary as a JS string). The metadata buffer — which constitutes the structural backbone of the AST — avoids serialization/deserialization overhead entirely. The string data requires a single bulk copy but avoids per-node string allocation. The JS bridge then reconstructs the standard PostCSS JS AST classes (`Root`, `Rule`, `Declaration`, `AtRule`, `Comment`) by simple array index offsets and substring extraction.
 
 ```
                    ┌──────────────────┐
@@ -65,13 +65,24 @@ Each parsed CSS node occupies exactly **23 contiguous `i32` slots** in the `meta
 
 ## ⚡ Performance & Benchmark Results
 
-Benchmark results on a **1.63 MB CSS document** (64,480 lines of CSS / 16,160 top-level rules):
+Benchmark results measured across 50 iterations with `--expose-gc` (median execution time):
+
+### Synthetic Large Document (1.63 MB / ~64,500 lines)
 
 | Parser Engine / Mode | Execution Time (ms) | Speedup vs JS PostCSS |
 | :--- | :---: | :---: |
-| **Original PostCSS (Pure JS)** | **62.41 ms** | 1.0x (Baseline) |
-| **Raw Rust Parser (Native Buffer)** | **16.80 ms** | **3.7x faster** ⚡ |
-| **Drop-in Replacement (`postcss-rs`)** | **37.50 ms** | **1.7x faster** 🚀 |
+| **Original PostCSS (Pure JS)** | ~49.3 ms | 1.0× (Baseline) |
+| **Rust Parse + Buffer Only** _(not a usable AST)_ | ~16.6 ms | **~2.97× faster** ⚡ |
+| **Drop-in Replacement (`postcss-rs`)** | ~29.3 ms | **~1.68× faster** 🚀 |
+
+### Real-World CSS Fixtures (~66 KB / ~1,300–1,500 lines)
+
+| Fixture Input | JS PostCSS | Drop-in (`postcss-rs`) | Drop-in Speedup | Buffer Only | Buffer Speedup |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **Bootstrap-like CSS** (65.8 KB) | 1.52 ms | 1.20 ms | **1.27× faster** | 0.78 ms | 1.94× faster |
+| **Tailwind-like CSS** (66.7 KB) | 1.66 ms | 1.35 ms | **1.23× faster** | 0.87 ms | 1.91× faster |
+
+> **Note:** "Rust Parse + Buffer Only" measures Rust parsing and buffer serialization without JS AST reconstruction. It returns a raw `Int32Array` metadata buffer, not a usable PostCSS AST. The "Drop-in Replacement" is the relevant comparison for end-users — it returns a fully usable PostCSS AST with verified structural parity. For smaller files (~66 KB), NAPI boundary and JS AST reconstruction overhead is a larger fraction of runtime, resulting in ~1.25× speedups, while larger CSS files demonstrate ~1.68× speedups.
 
 ### Key Optimizations
 - **`mimalloc` Allocator Integration**: Configured Microsoft's `mimalloc` as global Rust allocator (`#[global_allocator]`), minimizing native heap allocation latency.
@@ -102,13 +113,18 @@ pnpm run build:debug
 ```
 
 ### Running Benchmarks
-Run the benchmark suite comparing JS PostCSS vs `postcss-rs`:
+Run the benchmark suite comparing JS PostCSS vs `postcss-rs` (use `--expose-gc` for best results):
 ```bash
-node benchmark.js
+node --expose-gc benchmark.js
 ```
 
 ## 🧪 Testing and Verification
-Run the comprehensive AST parity and error verification suite:
+Run the comprehensive test suite (AST parity, real-world fixture verification, and fuzz testing):
 ```bash
 pnpm test
+```
+
+Run fuzz testing separately with a custom seed for reproducibility:
+```bash
+FUZZ_SEED=42 FUZZ_ITERATIONS=1000 node test_fuzz.js
 ```
