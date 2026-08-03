@@ -25,7 +25,7 @@
     "build": "napi build --platform --release",
     "build:debug": "napi build --platform",
     "artifacts": "napi artifacts",
-    "test": "node test_all.js && node validate.js && node test_fixtures.js && node test_fuzz.js"
+    "test": "node test_all.js && node validate.js && node test_fixtures.js && node test_fuzz.js && node test_plugins.js"
   },
   "devDependencies": {
     "@napi-rs/cli": "^2.18.0",
