@@ -1,5 +1,5 @@
 {
-  "name": "postcss-rs",
+  "name": "@gauravsaini/postcss-rs",
   "version": "1.0.1",
   "description": "High-performance Rust-based parser for CSS",
   "main": "bridge.js",
