@@ -19,39 +19,28 @@ jobs:
         include:
           - target: x86_64-apple-darwin
             os: macos-latest
-            use_zig: false
           - target: aarch64-apple-darwin
             os: macos-latest
-            use_zig: false
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            use_zig: false
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
-            use_zig: true
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            use_zig: true
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            use_zig: false
-          - target: aarch64-pc-windows-msvc
-            os: ubuntu-latest
-            use_zig: true
     runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Install musl-tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-
-      - name: Setup Zig
-        if: ${{ matrix.use_zig }}
-        uses: goto-bus-stop/setup-zig@v2
 
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
@@ -72,12 +61,7 @@ jobs:
       - name: Install dependencies
         run: pnpm install
 
-      - name: Build target binary (Zig)
-        if: ${{ matrix.use_zig }}
-        run: pnpm exec napi build --platform --target ${{ matrix.target }} --release --zig
-
-      - name: Build target binary (Native)
-        if: ${{ !matrix.use_zig }}
+      - name: Build target binary
         run: pnpm exec napi build --platform --target ${{ matrix.target }} --release
 
       - name: Upload artifact
